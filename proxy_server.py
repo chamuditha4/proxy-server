@@ -10,7 +10,8 @@ load_dotenv()
 def run_proxy():
     # Configuration from environment variables
     # Defaults: port 8899, no auth unless PROXY_USER and PROXY_PASS are set
-    port = int(os.environ.get("PROXY_PORT", 8899))
+    # Railway provides 'PORT' environment variable
+    port = int(os.environ.get("PROXY_PORT") or os.environ.get("PORT") or 8899)
     username = os.environ.get("PROXY_USER")
     password = os.environ.get("PROXY_PASS")
     
