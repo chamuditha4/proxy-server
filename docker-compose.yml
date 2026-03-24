@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  proxy:
+    build: .
+    container_name: authenticated-proxy
+    ports:
+      - "8899:8899"
+    env_file:
+      - .env
+    restart: always
