@@ -251,6 +251,8 @@ async def main():
     status = StatusServer(registry)
     dns = CloudflareDNS()
 
+    print(f"[registry] discovery backend: {registry.provider.name}", flush=True)
+
     # Populate the routing table before accepting traffic.
     try:
         await registry.sync()

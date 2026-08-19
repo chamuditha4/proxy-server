@@ -1,27 +1,29 @@
-"""Node registry: discovers proxy nodes from the Tailscale API and health-checks them."""
+"""Node registry: keeps a live map of node name -> reachable backend address.
+
+Discovery is pluggable (see the discovery package); health checking, username
+routing and failover are the same whichever mesh you run.
+"""
 
 import asyncio
 import os
 import random
 import time
 
-import httpx
-
-TAILSCALE_API = "https://api.tailscale.com/api/v2"
+from discovery import build_provider
 
 
 class Node:
-    def __init__(self, name, ip, port, tailscale_name):
+    def __init__(self, name, ip, port, source_name):
         self.name = name
         self.ip = ip
         self.port = port
-        self.tailscale_name = tailscale_name
+        self.source_name = source_name
         self.healthy = False
         self.last_check = 0.0
 
     @property
     def group(self):
-        # "de-1" -> "de", used so a client can ask for any node in a region
+        # "de-1" -> "de", so a client can ask for any node in a region
         return self.name.rsplit("-", 1)[0] if "-" in self.name else self.name
 
     def as_dict(self):
@@ -31,99 +33,45 @@ class Node:
             "ip": self.ip,
             "port": self.port,
             "healthy": self.healthy,
-            "tailscale_name": self.tailscale_name,
+            "source_name": self.source_name,
             "last_check": self.last_check,
         }
 
 
 class Registry:
-    """Keeps an up-to-date map of node name -> backend address."""
-
-    def __init__(self):
-        self.tailnet = os.environ.get("TAILNET", "-")
-        self.api_key = os.environ.get("TAILSCALE_API_KEY")
-        self.oauth_id = os.environ.get("TAILSCALE_OAUTH_CLIENT_ID")
-        self.oauth_secret = os.environ.get("TAILSCALE_OAUTH_CLIENT_SECRET")
-        self.node_tag = os.environ.get("NODE_TAG", "tag:proxy-node")
-        self.name_prefix = os.environ.get("NODE_NAME_PREFIX", "proxy-")
-        self.node_port = int(os.environ.get("NODE_PORT", 8899))
+    def __init__(self, provider=None):
+        self.provider = provider or build_provider()
         self.sync_interval = int(os.environ.get("SYNC_INTERVAL", 60))
         self.health_interval = int(os.environ.get("HEALTH_INTERVAL", 30))
         self.health_timeout = float(os.environ.get("HEALTH_TIMEOUT", 3))
         self.any_keyword = os.environ.get("ANY_KEYWORD", "any")
-
         self.nodes = {}
-        self._token = None
-        self._token_expires = 0.0
+        # Names the mesh reports as disconnected; skipped by the TCP check.
+        self.offline = set()
 
-    # --- Tailscale API ---------------------------------------------------
-
-    async def _auth_header(self, client):
-        if self.api_key:
-            return {"Authorization": f"Bearer {self.api_key}"}
-
-        if not self.oauth_id or not self.oauth_secret:
-            raise RuntimeError(
-                "Set TAILSCALE_API_KEY, or TAILSCALE_OAUTH_CLIENT_ID + "
-                "TAILSCALE_OAUTH_CLIENT_SECRET"
-            )
-
-        if self._token and time.time() < self._token_expires - 60:
-            return {"Authorization": f"Bearer {self._token}"}
-
-        resp = await client.post(
-            f"{TAILSCALE_API}/oauth/token",
-            data={
-                "client_id": self.oauth_id,
-                "client_secret": self.oauth_secret,
-                "grant_type": "client_credentials",
-            },
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        self._token = payload["access_token"]
-        self._token_expires = time.time() + payload.get("expires_in", 3600)
-        return {"Authorization": f"Bearer {self._token}"}
-
-    def _node_name(self, device):
-        # Tailscale hostname "proxy-de-1" -> node name "de-1"
-        hostname = device.get("hostname") or device.get("name", "").split(".")[0]
-        if self.name_prefix and hostname.startswith(self.name_prefix):
-            hostname = hostname[len(self.name_prefix):]
-        return hostname
-
-    @staticmethod
-    def _ipv4(device):
-        for addr in device.get("addresses", []):
-            if ":" not in addr:
-                return addr
-        return None
+    # --- discovery -------------------------------------------------------
 
     async def sync(self):
-        """Pull the device list and rebuild the routing table."""
-        async with httpx.AsyncClient(timeout=15) as client:
-            headers = await self._auth_header(client)
-            resp = await client.get(
-                f"{TAILSCALE_API}/tailnet/{self.tailnet}/devices", headers=headers
-            )
-            resp.raise_for_status()
-            devices = resp.json().get("devices", [])
+        """Rebuild the routing table from the discovery provider."""
+        specs = await self.provider.fetch()
 
         discovered = {}
-        for device in devices:
-            if self.node_tag not in (device.get("tags") or []):
+        offline = []
+        for spec in specs:
+            if not spec.name or not spec.ip:
                 continue
-            ip = self._ipv4(device)
-            if not ip:
-                continue
-            name = self._node_name(device)
-            existing = self.nodes.get(name)
-            node = Node(name, ip, self.node_port, device.get("name", name))
-            if existing and existing.ip == ip:
-                # Preserve health state across syncs so traffic isn't paused.
+            existing = self.nodes.get(spec.name)
+            node = Node(spec.name, spec.ip, spec.port, spec.source_name)
+            if existing and existing.ip == node.ip and existing.port == node.port:
+                # Keep health state so traffic isn't paused on every sync.
                 node.healthy = existing.healthy
                 node.last_check = existing.last_check
-            discovered[name] = node
+            if spec.online is False:
+                # The mesh says this peer is disconnected. Believe a False
+                # immediately; a True still has to pass the TCP check.
+                node.healthy = False
+                offline.append(node.name)
+            discovered[spec.name] = node
 
         added = set(discovered) - set(self.nodes)
         removed = set(self.nodes) - set(discovered)
@@ -133,6 +81,7 @@ class Registry:
             print(f"[registry] nodes removed: {sorted(removed)}", flush=True)
 
         self.nodes = discovered
+        self.offline = set(offline)
         return self.nodes
 
     # --- health ----------------------------------------------------------
@@ -155,7 +104,8 @@ class Registry:
         node.last_check = time.time()
 
     async def health_check(self):
-        await asyncio.gather(*(self._check(n) for n in list(self.nodes.values())))
+        targets = [n for n in self.nodes.values() if n.name not in self.offline]
+        await asyncio.gather(*(self._check(n) for n in targets))
 
     # --- selection -------------------------------------------------------
 

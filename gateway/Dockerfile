@@ -14,6 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY gateway.py registry.py dns_sync.py ./
+COPY discovery ./discovery
 
 EXPOSE 8899
 EXPOSE 9000
