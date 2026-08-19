@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  gateway:
+    build: .
+    container_name: proxy-gateway
+    ports:
+      - "${GATEWAY_PORT:-8899}:8899"
+      # Status JSON stays bound to localhost on the host.
+      - "127.0.0.1:${STATUS_PORT:-9000}:9000"
+    env_file:
+      - .env
+    restart: always

@@ -5,7 +5,10 @@ services:
     build: .
     container_name: authenticated-proxy
     ports:
-      - "8899:8899"
+      # NODE_BIND_IP is the server's Tailscale address, so the proxy is
+      # reachable only from the tailnet. It defaults to loopback: if the
+      # variable is missing, nothing is exposed rather than everything.
+      - "${NODE_BIND_IP:-127.0.0.1}:8899:8899"
     env_file:
       - .env
     restart: always
