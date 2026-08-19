@@ -1,0 +1,36 @@
+# Gateway that is ITSELF on the NetBird mesh, so it can reach node overlay IPs.
+# Use this instead of docker-compose.yml when DISCOVERY_BACKEND=netbird.
+#
+#   docker compose -f docker-compose.mesh.yml up -d --build
+#
+# Requires NB_SETUP_KEY (your 'proxy-gw' setup key) in the .env file.
+name: proxy-gateway
+
+services:
+  # NetBird client owns the network namespace. The gateway shares it, so the
+  # gateway can both accept public traffic (published here) and dial 100.x
+  # node addresses over wt0.
+  netbird:
+    image: netbirdio/netbird:latest
+    hostname: gateway
+    cap_add: [NET_ADMIN, SYS_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      NB_SETUP_KEY: "${NB_SETUP_KEY}"
+      NB_MANAGEMENT_URL: "https://api.netbird.io"
+    volumes:
+      - netbird-state:/var/lib/netbird
+    ports:
+      - "8899:8899"                 # the single public endpoint
+      - "127.0.0.1:9000:9000"       # status JSON, localhost only
+    restart: always
+
+  gateway:
+    build: .
+    network_mode: "service:netbird" # share the mesh namespace
+    depends_on: [netbird]
+    env_file: [.env]                # GATEWAY_PASS, NETBIRD_TOKEN, CF_*, etc.
+    restart: always
+
+volumes:
+  netbird-state:
