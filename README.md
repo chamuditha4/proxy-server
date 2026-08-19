@@ -63,6 +63,11 @@ scale and keeps proxy traffic on a direct node-to-node path. Since you're
 self-hosting proxies anyway, self-hosting the coordination server removes the
 last third party from the design.
 
+One exception: NetBird has no userspace WireGuard mode, so it can't run on a
+platform that won't grant `NET_ADMIN` and `/dev/net/tun`. If your nodes live on
+Railway, Render, Fly or similar, use `tailscale` for those — see
+[Nodes on env-only platforms](#nodes-on-env-only-platforms-railway-render-fly-koyeb-cloud-run).
+
 ### About the Cloudflare backend
 
 It works, and it's implemented — nodes run `cloudflared` advertising a private
@@ -214,6 +219,71 @@ public interface. The name you pass (`de-1`) is the username clients will use.
 
 Naming is a convention: `<group>-<number>`. The part before the last dash is the
 group, so `de-1` and `de-2` both answer to username `de`.
+
+### Nodes on env-only platforms (Railway, Render, Fly, Koyeb, Cloud Run)
+
+Those platforms run one image and give you nothing but environment variables —
+no `--cap-add`, no `--device`, no volumes. The all-in-one node image
+[docker/Dockerfile.aio](docker/Dockerfile.aio) is built for exactly that: mesh
+client and proxy in a single container, every knob an env var.
+
+```bash
+# Anywhere that only accepts env vars. Note: no flags at all.
+docker run -d \
+  -e MESH=tailscale \
+  -e NODE_NAME=de-1 \
+  -e TS_AUTHKEY=tskey-auth-xxxxxxxx \
+  twozerotwo/proxy-node-aio:1.1.0
+```
+
+On Railway: point the service at this repo, set `RAILWAY_DOCKERFILE_PATH` to
+`docker/Dockerfile.aio`, add the three variables above, deploy. Nothing else.
+Leave the service **private** — the node is reached over the tailnet, not over
+Railway's public networking.
+
+**It has to be Tailscale here, not NetBird.** Kernel WireGuard needs
+`NET_ADMIN` and `/dev/net/tun`, which these platforms don't hand out. Tailscale
+is the only one of the two with a userspace mode (`--tun=userspace-networking`),
+where its netstack accepts inbound tailnet connections and forwards them to the
+proxy on localhost. The proxy's own egress still leaves through the platform's
+normal network — which is the whole point of an exit node. Use an **ephemeral,
+pre-authorized, tagged** auth key: state is kept in memory (`TS_STATE=mem:`)
+since there's no volume, so the peer re-registers on every deploy and removes
+itself when the container stops.
+
+The same image also runs the other two modes:
+
+| `MESH` | Needs | Use when |
+| --- | --- | --- |
+| `tailscale` | nothing | PaaS, or any host where you can't grant capabilities |
+| `netbird` | `--cap-add=NET_ADMIN --device=/dev/net/tun` | your own VPS |
+| `none` | a public port + `PROXY_USER`/`PROXY_PASS` | platform gives you a public TCP endpoint and you'd rather skip the mesh |
+| `auto` (default) | — | picks `tailscale` if `TS_AUTHKEY` is set, `netbird` if `NB_SETUP_KEY` is |
+
+`MESH=none` publishes the proxy directly, so the image refuses to start unless
+both `PROXY_USER` and `PROXY_PASS` are set. Register such a node with the
+gateway by hand — `DISCOVERY_BACKEND=static`,
+`STATIC_NODES=de-1=node.up.railway.app:12345`, plus `NODE_PROXY_USER` /
+`NODE_PROXY_PASS` (read the caveat under [Node auth](#node-auth) first).
+
+Every variable the all-in-one image reads:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MESH` | `auto` | `auto`, `tailscale`, `netbird`, `none` |
+| `NODE_NAME` | container id | Mesh hostname `proxy-<NODE_NAME>` **and** the client username |
+| `PROXY_PORT` | `$PORT`, else `8899` | Platform-injected `$PORT` is picked up automatically |
+| `TS_AUTHKEY` | — | Tailscale auth key. Required for `MESH=tailscale` |
+| `NODE_TAG` | `tag:proxy-node` | Advertised tag; the gateway discovers by it. Empty string to skip |
+| `TS_STATE` | `mem:` | Set to a path only if you actually have a volume |
+| `TS_LOGIN_SERVER` | — | Headscale or another control server |
+| `TS_EXTRA_ARGS` | — | Appended verbatim to `tailscale up` |
+| `NB_SETUP_KEY` | — | NetBird setup key. Required for `MESH=netbird` |
+| `NB_MANAGEMENT_URL` | `https://api.netbird.io` | Self-hosted NetBird |
+| `PROXY_USER` / `PROXY_PASS` | empty | Leave empty behind a gateway; required for `MESH=none` |
+
+If the mesh client dies the container exits rather than sitting there as an
+unreachable-but-healthy proxy, so the platform's restart policy takes over.
 
 ## Configuration
 

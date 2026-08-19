@@ -1,14 +1,29 @@
-# All-in-one proxy NODE image: NetBird client + proxy in a single container.
-# For platforms that run one image and don't do docker-compose.
+# All-in-one proxy NODE: mesh client + proxy in a single container, configured
+# entirely through environment variables. One image, three MESH modes:
 #
+#   MESH=tailscale  userspace WireGuard. NO capabilities, NO devices, NO volumes
+#                   -> works on Railway, Render, Fly, Koyeb, Cloud Run, ECS.
+#   MESH=netbird    kernel WireGuard. NEEDS --cap-add=NET_ADMIN --device=/dev/net/tun
+#                   -> your own VPS / anywhere you control the docker run.
+#   MESH=none       no mesh at all; the proxy is public and authenticates itself.
+#                   Register it with the gateway via STATIC_NODES.
+#
+# Env-only platforms (Railway et al):
+#   MESH=tailscale  NODE_NAME=de-1  TS_AUTHKEY=tskey-auth-...
+#
+# Self-hosted VPS with the mesh you already run:
 #   docker run -d --cap-add=NET_ADMIN --device=/dev/net/tun \
-#     -e NODE_NAME=de-1 -e NB_SETUP_KEY=<proxy-nodes key> \
-#     twozerotwo/proxy-node-aio:1.0.0
-#
-# Requires NET_ADMIN + /dev/net/tun at runtime (WireGuard needs a tun device).
-FROM netbirdio/netbird:latest
+#     -e MESH=netbird -e NODE_NAME=de-1 -e NB_SETUP_KEY=... twozerotwo/proxy-node-aio:1.1.0
 
-# proxy.py runtime
+# The netbird binary is lifted out of the official image so one image serves
+# both meshes; nothing from netbirdio runs unless MESH=netbird.
+FROM netbirdio/netbird:latest AS netbird
+
+# tailscale/tailscale is Alpine and ships tailscale + tailscaled.
+FROM tailscale/tailscale:latest
+
+COPY --from=netbird /usr/local/bin/netbird /usr/local/bin/netbird
+
 RUN apk add --no-cache python3 py3-pip
 COPY requirements.txt /app/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r /app/requirements.txt
@@ -16,8 +31,17 @@ COPY proxy_server.py /app/proxy_server.py
 COPY docker/aio-entrypoint.sh /aio-entrypoint.sh
 RUN chmod +x /aio-entrypoint.sh
 
-ENV PROXY_PORT=8899
-# Auth happens at the gateway; a node never authenticates clients.
+# Pick the mesh from whichever key is present unless MESH says otherwise.
+ENV MESH=auto
+# PROXY_PORT is deliberately NOT set here: an image-level default would shadow
+# the $PORT that Railway/Render/Heroku inject. The entrypoint resolves
+# PROXY_PORT -> PORT -> 8899.
+# State lives in memory so no volume is ever required. Pair it with an
+# EPHEMERAL auth key: the peer then removes itself when the container stops.
+# Set TS_STATE=/var/lib/tailscale/tailscaled.state if you do have a volume.
+ENV TS_STATE=mem:
+ENV NODE_TAG=tag:proxy-node
+# Auth happens at the gateway; a meshed node never authenticates clients.
 ENV PROXY_USER=""
 ENV PROXY_PASS=""
 
