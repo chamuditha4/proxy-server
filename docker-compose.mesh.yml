@@ -1,0 +1,41 @@
+# Proxy NODE, deployed purely with Docker — NetBird runs in a container next to
+# the proxy, so nothing is installed on the host and no port is ever public.
+#
+#   NODE_NAME=de-1 NB_SETUP_KEY=<proxy-nodes key> \
+#     docker compose -f docker-compose.mesh.yml up -d --build
+#
+# The gateway discovers this node within ~60s and routes to it. The node name
+# becomes the proxy username clients use.
+name: proxy-node
+
+services:
+  # NetBird owns the network namespace and joins the mesh in the proxy-node
+  # group. Hostname "proxy-<NODE_NAME>" -> gateway strips the prefix -> the node
+  # is addressable as username "<NODE_NAME>".
+  netbird:
+    image: netbirdio/netbird:latest
+    hostname: "proxy-${NODE_NAME:?set NODE_NAME, e.g. de-1}"
+    cap_add: [NET_ADMIN, SYS_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      NB_SETUP_KEY: "${NB_SETUP_KEY:?set NB_SETUP_KEY (your proxy-nodes key)}"
+      NB_MANAGEMENT_URL: "${NB_MANAGEMENT_URL:-https://api.netbird.io}"
+    volumes:
+      - netbird-state:/var/lib/netbird
+    restart: always
+
+  # The proxy shares NetBird's namespace, so it listens on the mesh address.
+  # No `ports:` — nothing is published to the host, so it is mesh-reachable only.
+  proxy:
+    build: .
+    network_mode: "service:netbird"
+    depends_on: [netbird]
+    environment:
+      PROXY_PORT: "${PROXY_PORT:-8899}"
+      # Auth happens at the gateway; a node never authenticates clients.
+      PROXY_USER: ""
+      PROXY_PASS: ""
+    restart: always
+
+volumes:
+  netbird-state:
