@@ -4,9 +4,9 @@ FROM python:3.11-slim
 # Set environment variables
 # No default PROXY_USER/PROXY_PASS: unset = unauthenticated (mesh-protected).
 # Never ship predictable credentials in the image.
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-ENV PROXY_PORT 8899
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PROXY_PORT=8899
 
 # Set work directory
 WORKDIR /app

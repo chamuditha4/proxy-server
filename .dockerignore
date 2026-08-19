@@ -1,0 +1,11 @@
+# Never ship secrets or local state into the build context
+.env
+.env.*
+!.env.example
+gateway/.env
+gateway/.env.*
+**/.env
+.git
+__pycache__
+**/__pycache__
+*.pyc

@@ -1,0 +1,25 @@
+# All-in-one proxy NODE image: NetBird client + proxy in a single container.
+# For platforms that run one image and don't do docker-compose.
+#
+#   docker run -d --cap-add=NET_ADMIN --device=/dev/net/tun \
+#     -e NODE_NAME=de-1 -e NB_SETUP_KEY=<proxy-nodes key> \
+#     twozerotwo/proxy-node-aio:1.0.0
+#
+# Requires NET_ADMIN + /dev/net/tun at runtime (WireGuard needs a tun device).
+FROM netbirdio/netbird:latest
+
+# proxy.py runtime
+RUN apk add --no-cache python3 py3-pip
+COPY requirements.txt /app/requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r /app/requirements.txt
+COPY proxy_server.py /app/proxy_server.py
+COPY docker/aio-entrypoint.sh /aio-entrypoint.sh
+RUN chmod +x /aio-entrypoint.sh
+
+ENV PROXY_PORT=8899
+# Auth happens at the gateway; a node never authenticates clients.
+ENV PROXY_USER=""
+ENV PROXY_PASS=""
+
+EXPOSE 8899
+ENTRYPOINT ["/aio-entrypoint.sh"]

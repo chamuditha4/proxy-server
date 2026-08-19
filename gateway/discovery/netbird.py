@@ -43,13 +43,22 @@ class NetbirdProvider(Provider):
             ip = peer.get("ip")
             if not ip:
                 continue
-            hostname = peer.get("hostname") or peer.get("name") or ""
+            # NetBird exposes two names: "name" (set by `netbird up --hostname`,
+            # user-controlled, correct for single-container/all-in-one nodes) and
+            # "hostname" (the OS hostname, which a container can't set without
+            # SYS_ADMIN). Prefer whichever already carries our prefix; otherwise
+            # fall back to "name". This keeps every deploy path routable.
+            candidates = [c for c in (peer.get("name"), peer.get("hostname")) if c]
+            chosen = next(
+                (c for c in candidates if c.startswith(self.name_prefix)),
+                candidates[0] if candidates else "",
+            )
             specs.append(
                 NodeSpec(
-                    name=self.strip_prefix(hostname),
+                    name=self.strip_prefix(chosen),
                     ip=ip,
                     port=self.node_port,
-                    source_name=peer.get("name") or hostname,
+                    source_name=peer.get("name") or peer.get("hostname"),
                     # NetBird reports live connection state; trust a False.
                     online=peer.get("connected"),
                 )
